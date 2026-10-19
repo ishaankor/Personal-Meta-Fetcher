@@ -59,7 +59,7 @@ export default async function handler(req, res) {
 
   const now = Date.now();
   const force = req.query?.force === 'true' || req.query?._t !== undefined;
-  const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 15, 1), 50);
+  const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 5, 1), 20);
   const repoFilter = req.query?.repo ? String(req.query.repo).trim() : null;
 
   // Serve fast memory cache if fresh and not explicitly forced
