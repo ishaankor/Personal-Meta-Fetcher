@@ -85,26 +85,58 @@ export default async function handler(req, res) {
 
   try {
     let targetRepos = [];
+    let userProfile = null;
+    let reposList = [];
 
     if (repoFilter) {
       const cleanRepo = repoFilter.includes('/') ? repoFilter.split('/')[1] : repoFilter;
       targetRepos = [{ name: cleanRepo, html_url: `https://github.com/${username}/${cleanRepo}` }];
     } else {
-      // 1. Fetch top 5 most recently pushed repositories
-      const reposRes = await fetch(
-        `https://api.github.com/users/${username}/repos?sort=pushed&per_page=6`,
-        { headers, cache: 'no-store' }
-      );
+      // 1. Fetch user profile and repositories concurrently
+      const [userRes, reposRes] = await Promise.all([
+        fetch(`https://api.github.com/users/${username}`, { headers, cache: 'no-store' }),
+        fetch(
+          `https://api.github.com/users/${username}/repos?sort=pushed&per_page=100`,
+          { headers, cache: 'no-store' }
+        ),
+      ]);
+
+      if (userRes.ok) {
+        const u = await userRes.json();
+        userProfile = {
+          login: u.login,
+          avatar_url: u.avatar_url || `https://github.com/${username}.png`,
+          html_url: u.html_url,
+          name: u.name || 'Ishaan Koradia',
+          bio: u.bio || '',
+          public_repos: u.public_repos || 20,
+          created_at: u.created_at || '2022-01-01T00:00:00Z',
+        };
+      }
 
       if (reposRes.ok) {
         const reposData = await reposRes.json();
         if (Array.isArray(reposData)) {
-          targetRepos = reposData.slice(0, 5).map((r) => ({
-            name: r.name,
-            html_url: r.html_url,
-            pushed_at: r.pushed_at,
-          }));
+          reposList = reposData
+            .filter((r) => !r.fork && (r.owner?.login === username || r.owner?.login === undefined))
+            .map((r) => ({
+              id: r.id,
+              name: r.name,
+              language: r.language,
+              html_url: r.html_url,
+              description: r.description,
+              created_at: r.created_at,
+              pushed_at: r.pushed_at,
+              updated_at: r.updated_at,
+            }));
+
+          // Top 6 most recently pushed repositories for commit lookup
+          targetRepos = reposList.slice(0, 6);
         }
+      }
+
+      if (userProfile && reposList.length > 0) {
+        userProfile.public_repos = userProfile.public_repos || reposList.length;
       }
     }
 
@@ -282,6 +314,8 @@ export default async function handler(req, res) {
     const payload = {
       status: 'online',
       username,
+      user: userProfile,
+      repos: reposList,
       commits: finalCommits,
       latestCommit,
       total: finalCommits.length,
