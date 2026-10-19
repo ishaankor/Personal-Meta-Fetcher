@@ -59,7 +59,7 @@ export default async function handler(req, res) {
 
   const now = Date.now();
   const force = req.query?.force === 'true' || req.query?._t !== undefined;
-  const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 6, 1), 20);
+  const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 15, 1), 50);
   const repoFilter = req.query?.repo ? String(req.query.repo).trim() : null;
 
   // Serve fast memory cache if fresh and not explicitly forced
@@ -87,19 +87,59 @@ export default async function handler(req, res) {
     let targetRepos = [];
     let userProfile = null;
     let reposList = [];
+    let contributionCalendar = null;
 
     if (repoFilter) {
       const cleanRepo = repoFilter.includes('/') ? repoFilter.split('/')[1] : repoFilter;
       targetRepos = [{ name: cleanRepo, html_url: `https://github.com/${username}/${cleanRepo}` }];
     } else {
-      // 1. Fetch user profile and repositories concurrently
-      const [userRes, reposRes] = await Promise.all([
+      // 1. Fetch user profile, repositories, and contribution calendar concurrently
+      const [userRes, reposRes, gqlRes] = await Promise.all([
         fetch(`https://api.github.com/users/${username}`, { headers, cache: 'no-store' }),
         fetch(
           `https://api.github.com/users/${username}/repos?sort=pushed&per_page=100`,
           { headers, cache: 'no-store' }
         ),
+        token
+          ? fetch('https://api.github.com/graphql', {
+              method: 'POST',
+              headers: {
+                ...headers,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                query: `
+                  query {
+                    user(login: "${username}") {
+                      contributionsCollection {
+                        contributionCalendar {
+                          totalContributions
+                          weeks {
+                            contributionDays {
+                              date
+                              contributionCount
+                              color
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `,
+              }),
+              cache: 'no-store',
+            }).catch(() => null)
+          : Promise.resolve(null),
       ]);
+
+      if (gqlRes && gqlRes.ok) {
+        try {
+          const gqlJson = await gqlRes.json();
+          contributionCalendar = gqlJson.data?.user?.contributionsCollection?.contributionCalendar || null;
+        } catch {
+          // ignore gql parse error
+        }
+      }
 
       if (userRes.ok) {
         const u = await userRes.json();
@@ -130,8 +170,8 @@ export default async function handler(req, res) {
               updated_at: r.updated_at,
             }));
 
-          // Top 6 most recently pushed repositories for commit lookup
-          targetRepos = reposList.slice(0, 6);
+          // Top 8 most recently pushed repositories for commit lookup
+          targetRepos = reposList.slice(0, 8);
         }
       }
 
@@ -317,6 +357,7 @@ export default async function handler(req, res) {
       user: userProfile,
       repos: reposList,
       commits: finalCommits,
+      contributionCalendar,
       latestCommit,
       total: finalCommits.length,
       fetchedAt: new Date().toISOString(),
