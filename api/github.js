@@ -127,8 +127,9 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   // 1. Explicit 'since' timestamp or date string
   if (since) {
     const s = String(since).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-      sinceDate = new Date(`${s}T00:00:00${tzOffset}`);
+    const sMatch = s.match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+    if (sMatch) {
+      sinceDate = new Date(`${sMatch[1]}T00:00:00${tzOffset}`);
     } else {
       sinceDate = parseNaturalDate(s, now, tzOffset, false) || new Date(s);
     }
@@ -137,8 +138,9 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
   // 2. Explicit 'until' timestamp or date string
   if (until) {
     const u = String(until).trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(u)) {
-      untilDate = new Date(`${u}T23:59:59${tzOffset}`);
+    const uMatch = u.match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+    if (uMatch) {
+      untilDate = new Date(`${uMatch[1]}T23:59:59${tzOffset}`);
     } else {
       untilDate = parseNaturalDate(u, now, tzOffset, true) || new Date(u);
     }
@@ -164,14 +166,17 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
       s = e;
       e = tmp;
     }
-    sinceDate = parseNaturalDate(s, now, tzOffset, false) || (/^\d{4}-\d{2}-\d{2}$/.test(s) ? new Date(`${s}T00:00:00${tzOffset}`) : new Date(s));
-    untilDate = parseNaturalDate(e, now, tzOffset, true) || (/^\d{4}-\d{2}-\d{2}$/.test(e) ? new Date(`${e}T23:59:59${tzOffset}`) : new Date(e));
+    const sMatch = s.match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+    const eMatch = e.match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+    sinceDate = parseNaturalDate(s, now, tzOffset, false) || (sMatch ? new Date(`${sMatch[1]}T00:00:00${tzOffset}`) : new Date(s));
+    untilDate = parseNaturalDate(e, now, tzOffset, true) || (eMatch ? new Date(`${eMatch[1]}T23:59:59${tzOffset}`) : new Date(e));
     resolvedLabel = resolvedLabel || `${s} to ${e}`;
   }
 
-  // 5. Single date string in 'date' (e.g. 2026-10-06)
-  if (date && /^\d{4}-\d{2}-\d{2}$/.test(String(date).trim()) && !sinceDate) {
-    const d = String(date).trim();
+  // 5. Single date string in 'date' (e.g. 2026-10-06 or 2026-10-06T00:00:00Z)
+  const singleDateMatch = date && String(date).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+  if (singleDateMatch && !sinceDate) {
+    const d = singleDateMatch[1];
     sinceDate = new Date(`${d}T00:00:00${tzOffset}`);
     untilDate = new Date(`${d}T23:59:59${tzOffset}`);
     resolvedLabel = d;
@@ -619,8 +624,10 @@ export default async function handler(req, res) {
 
       let dateSearchParam = null;
       if (!isLifetimeQuery) {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)) {
-          dateSearchParam = `${activeDateOrTimeframe}T00:00:00${localTz}..${activeDateOrTimeframe}T23:59:59${localTz}`;
+        const singleIsoMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+        if (singleIsoMatch) {
+          const cleanIso = singleIsoMatch[1];
+          dateSearchParam = `${cleanIso}T00:00:00${localTz}..${cleanIso}T23:59:59${localTz}`;
         } else if (tfWindow.sinceDate) {
           const startStr = tfWindow.sinceDate.split('T')[0];
           const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
@@ -672,10 +679,11 @@ export default async function handler(req, res) {
             return (isoStr || '').split('T')[0];
           }
         };
-        const filteredItems = /^\d{4}-\d{2}-\d{2}$/.test(activeDateOrTimeframe)
+        const dateMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+        const filteredItems = dateMatch
           ? allItems.filter((item) => {
               const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
-              return getLocalDateStr(commitDate) === activeDateOrTimeframe;
+              return getLocalDateStr(commitDate) === dateMatch[1];
             })
           : allItems;
 
