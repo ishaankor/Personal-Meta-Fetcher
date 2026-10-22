@@ -323,7 +323,7 @@ const KNOWN_EARLIEST_COMMIT = {
 };
 
 export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, stale-while-revalidate=60');
+  res.setHeader('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -1105,7 +1105,7 @@ export default async function handler(req, res) {
         html_url: u.html_url,
         name: u.name || 'Ishaan Koradia',
         bio: u.bio || '',
-        public_repos: u.public_repos || 20,
+        public_repos: u.public_repos || 23,
         created_at: u.created_at || '2022-01-01T00:00:00Z',
       };
     }
@@ -1311,7 +1311,7 @@ export default async function handler(req, res) {
       firstCommit: earliestCommit,
       metaTelemetry,
       contributionCalendar,
-      totalRepos: (userData && typeof userData.public_repos === 'number') ? userData.public_repos : reposData.length,
+      totalRepos: reposData.length,
       fetchedAt: new Date().toISOString(),
     };
     lastFetchTime = now;
@@ -1328,7 +1328,7 @@ export default async function handler(req, res) {
         avatar_url: `https://github.com/${username}.png`,
         name: 'Ishaan Koradia',
         bio: 'AI Engineer & self-taught developer',
-        public_repos: 20,
+        public_repos: 23,
       },
       repos: [],
       commits: [],
@@ -1341,7 +1341,6 @@ export default async function handler(req, res) {
         earliestCommit: KNOWN_EARLIEST_COMMIT,
         firstCommit: KNOWN_EARLIEST_COMMIT,
       },
-      totalRepos: 20,
       error: error.message,
     };
 
