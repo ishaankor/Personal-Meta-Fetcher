@@ -1105,7 +1105,7 @@ export default async function handler(req, res) {
         html_url: u.html_url,
         name: u.name || 'Ishaan Koradia',
         bio: u.bio || '',
-        public_repos: u.public_repos || 23,
+        public_repos: u.public_repos || 20,
         created_at: u.created_at || '2022-01-01T00:00:00Z',
       };
     }
@@ -1311,7 +1311,7 @@ export default async function handler(req, res) {
       firstCommit: earliestCommit,
       metaTelemetry,
       contributionCalendar,
-      totalRepos: reposData.length,
+      totalRepos: (userData && typeof userData.public_repos === 'number') ? userData.public_repos : reposData.length,
       fetchedAt: new Date().toISOString(),
     };
     lastFetchTime = now;
@@ -1328,7 +1328,7 @@ export default async function handler(req, res) {
         avatar_url: `https://github.com/${username}.png`,
         name: 'Ishaan Koradia',
         bio: 'AI Engineer & self-taught developer',
-        public_repos: 23,
+        public_repos: 20,
       },
       repos: [],
       commits: [],
@@ -1341,6 +1341,7 @@ export default async function handler(req, res) {
         earliestCommit: KNOWN_EARLIEST_COMMIT,
         firstCommit: KNOWN_EARLIEST_COMMIT,
       },
+      totalRepos: 20,
       error: error.message,
     };
 
