@@ -113,12 +113,22 @@ export default async function handler(req, res) {
                     user(login: "${username}") {
                       contributionsCollection {
                         contributionCalendar {
-                          totalContributions
                           weeks {
                             contributionDays {
                               date
-                              contributionCount
-                              color
+                            }
+                          }
+                        }
+                        commitContributionsByRepository(maxRepositories: 100) {
+                          repository {
+                            name
+                            isPrivate
+                          }
+                          contributions(first: 100) {
+                            totalCount
+                            nodes {
+                              occurredAt
+                              commitCount
                             }
                           }
                         }
@@ -135,7 +145,51 @@ export default async function handler(req, res) {
       if (gqlRes && gqlRes.ok) {
         try {
           const gqlJson = await gqlRes.json();
-          contributionCalendar = gqlJson.data?.user?.contributionsCollection?.contributionCalendar || null;
+          const rawCal = gqlJson.data?.user?.contributionsCollection?.contributionCalendar;
+          const repoList = gqlJson.data?.user?.contributionsCollection?.commitContributionsByRepository || [];
+
+          if (rawCal) {
+            const publicDailyCounts = {};
+            let publicTotal = 0;
+
+            repoList.forEach((item) => {
+              if (item.repository?.isPrivate) return;
+              const nodes = item.contributions?.nodes || [];
+              nodes.forEach((node) => {
+                const dayStr = (node.occurredAt || '').split('T')[0];
+                if (dayStr) {
+                  const count = node.commitCount || 0;
+                  publicDailyCounts[dayStr] = (publicDailyCounts[dayStr] || 0) + count;
+                  publicTotal += count;
+                }
+              });
+            });
+
+            const getColor = (count) => {
+              if (count === 0) return '#ebedf0';
+              if (count <= 3) return '#9be9a8';
+              if (count <= 6) return '#40c463';
+              if (count <= 9) return '#30a14e';
+              return '#216e39';
+            };
+
+            const cleansedWeeks = (rawCal.weeks || []).map((week) => ({
+              contributionDays: (week.contributionDays || []).map((day) => {
+                const count = publicDailyCounts[day.date] || 0;
+                return {
+                  date: day.date,
+                  contributionCount: count,
+                  color: getColor(count),
+                };
+              }),
+            }));
+
+            contributionCalendar = {
+              totalContributions: publicTotal,
+              weeks: cleansedWeeks,
+              isPublicOnly: true,
+            };
+          }
         } catch {
           // ignore gql parse error
         }

@@ -435,9 +435,10 @@ export default async function handler(req, res) {
           query {
             user(login: "${username}") {
               contributionsCollection(from: "${fromIso}", to: "${toIso}") {
-                commitContributionsByRepository(maxRepositories: 50) {
+                commitContributionsByRepository(maxRepositories: 100) {
                   repository {
                     name
+                    isPrivate
                   }
                   contributions(first: 100) {
                     totalCount
@@ -500,7 +501,7 @@ export default async function handler(req, res) {
       if (gqlRes?.data?.user?.contributionsCollection) {
         const reposList = gqlRes.data.user.contributionsCollection.commitContributionsByRepository || [];
         const match = reposList.find(
-          (r) => (r.repository?.name || '').toLowerCase() === cleanRepo.toLowerCase()
+          (r) => (r.repository?.name || '').toLowerCase() === cleanRepo.toLowerCase() && !r.repository?.isPrivate
         );
         if (match) {
           gqlRepoContributions = match.contributions?.totalCount || 0;
@@ -760,7 +761,7 @@ export default async function handler(req, res) {
                     }
                   }
                 }
-                commitContributionsByRepository(maxRepositories: 50) {
+                commitContributionsByRepository(maxRepositories: 100) {
                   repository {
                     name
                     isPrivate
@@ -810,21 +811,20 @@ export default async function handler(req, res) {
 
         if (gqlRes && gqlRes.data?.user?.contributionsCollection) {
           gqlContributionsCollection = gqlRes.data.user.contributionsCollection;
-          gqlCommitContributions = gqlContributionsCollection.totalCommitContributions ?? 0;
           const repoList = gqlContributionsCollection.commitContributionsByRepository || [];
+          let publicCommitContributions = 0;
           repoList.forEach((item) => {
+            // Strictly exclude private repositories from portfolio metrics
+            if (item.repository?.isPrivate) return;
+
             const rName = item.repository?.name;
             const rCount = item.contributions?.totalCount ?? 0;
             if (rName && rCount > 0) {
               gqlRepoContributions[rName] = rCount;
+              publicCommitContributions += rCount;
             }
           });
-        }
-
-        // GitHub REST search only indexes default branches and misses squashed/feature commits.
-        // GitHub GraphQL contributions collection provides authoritative contribution counts.
-        if (gqlCommitContributions > totalCount) {
-          totalCount = gqlCommitContributions;
+          gqlCommitContributions = publicCommitContributions;
         }
 
         // Concurrently paginate up to 10 pages (max 1,000 commits) to capture all historical repositories & commit counts
@@ -857,12 +857,16 @@ export default async function handler(req, res) {
           }
         };
         const dateMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
-        const filteredItems = dateMatch
-          ? allItems.filter((item) => {
-              const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
-              return getLocalDateStr(commitDate) === dateMatch[1];
-            })
-          : allItems;
+        const filteredItems = (allItems || []).filter((item) => {
+          // Strictly exclude private repositories
+          if (item.repository?.private) return false;
+
+          if (dateMatch) {
+            const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+            return getLocalDateStr(commitDate) === dateMatch[1];
+          }
+          return true;
+        });
 
         // Group repositories and counts across the complete dataset
         const repoCounts = {};
@@ -878,6 +882,16 @@ export default async function handler(req, res) {
             repoCounts[rName] = count;
           }
         });
+
+        // Recalculate totalCount strictly across public repositories
+        const calculatedPublicCommits = Object.values(repoCounts).reduce((a, b) => a + b, 0);
+        if (calculatedPublicCommits > 0) {
+          totalCount = calculatedPublicCommits;
+        } else if (gqlCommitContributions > 0) {
+          totalCount = gqlCommitContributions;
+        } else {
+          totalCount = filteredItems.length;
+        }
 
         const activeRepositories = Object.keys(repoCounts).sort();
 
@@ -1068,8 +1082,8 @@ export default async function handler(req, res) {
           latestCommit: calculatedLatestCommit,
           commits,
           contributionTelemetry: gqlContributionsCollection ? {
-            totalCommitContributions: gqlContributionsCollection.totalCommitContributions,
-            totalContributions: gqlContributionsCollection.contributionCalendar?.totalContributions,
+            totalCommitContributions: gqlCommitContributions,
+            totalContributions: gqlCommitContributions,
             commitContributionsByRepository: gqlRepoContributions,
           } : null,
           metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
@@ -1252,12 +1266,22 @@ export default async function handler(req, res) {
               user(login: "${username}") {
                 contributionsCollection {
                   contributionCalendar {
-                    totalContributions
                     weeks {
                       contributionDays {
                         date
-                        contributionCount
-                        color
+                      }
+                    }
+                  }
+                  commitContributionsByRepository(maxRepositories: 100) {
+                    repository {
+                      name
+                      isPrivate
+                    }
+                    contributions(first: 100) {
+                      totalCount
+                      nodes {
+                        occurredAt
+                        commitCount
                       }
                     }
                   }
@@ -1279,7 +1303,52 @@ export default async function handler(req, res) {
 
         if (gqlRes.ok) {
           const gqlJson = await gqlRes.json();
-          contributionCalendar = gqlJson.data?.user?.contributionsCollection?.contributionCalendar || null;
+          const rawCal = gqlJson.data?.user?.contributionsCollection?.contributionCalendar;
+          const repoList = gqlJson.data?.user?.contributionsCollection?.commitContributionsByRepository || [];
+
+          if (rawCal) {
+            // Aggregate daily commit counts strictly across PUBLIC repositories
+            const publicDailyCounts = {};
+            let publicTotal = 0;
+
+            repoList.forEach((item) => {
+              if (item.repository?.isPrivate) return; // Strictly ignore private repositories
+              const nodes = item.contributions?.nodes || [];
+              nodes.forEach((node) => {
+                const dayStr = (node.occurredAt || '').split('T')[0];
+                if (dayStr) {
+                  const count = node.commitCount || 0;
+                  publicDailyCounts[dayStr] = (publicDailyCounts[dayStr] || 0) + count;
+                  publicTotal += count;
+                }
+              });
+            });
+
+            const getColor = (count) => {
+              if (count === 0) return '#ebedf0';
+              if (count <= 3) return '#9be9a8';
+              if (count <= 6) return '#40c463';
+              if (count <= 9) return '#30a14e';
+              return '#216e39';
+            };
+
+            const cleansedWeeks = (rawCal.weeks || []).map((week) => ({
+              contributionDays: (week.contributionDays || []).map((day) => {
+                const count = publicDailyCounts[day.date] || 0;
+                return {
+                  date: day.date,
+                  contributionCount: count,
+                  color: getColor(count),
+                };
+              }),
+            }));
+
+            contributionCalendar = {
+              totalContributions: publicTotal,
+              weeks: cleansedWeeks,
+              isPublicOnly: true,
+            };
+          }
         }
       } catch (gqlErr) {
         console.error('GraphQL Contribution Calendar Fetch Error:', gqlErr);
