@@ -88,6 +88,13 @@ function parseNaturalDate(inputStr, now, tzOffset = 'Z', isEndOfDay = false) {
     const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
     return new Date(`${yr}-11-${String(day).padStart(2, '0')}T${timeStr}${tzOffset}`);
   }
+  if (s.includes('birthday') || s.includes('bday')) {
+    // Ishaan's birthday is April 19
+    const bdayDate = new Date(yr, 3, 19);
+    const finalYear = yearMatch ? yr : (now < bdayDate ? curYear - 1 : curYear);
+    const timeStr = isEndOfDay ? '23:59:59' : '00:00:00';
+    return new Date(`${finalYear}-04-19T${timeStr}${tzOffset}`);
+  }
 
   // Month day patterns: e.g. "october 6", "oct 6", "july 27, 2026"
   const months = {
@@ -190,7 +197,17 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
                          tf.match(/^(.+?)\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+through\s+)\s*(.+)$/i);
     if (betweenMatch) {
       const p1 = parseNaturalDate(betweenMatch[1], now, tzOffset, false);
-      const p2 = parseNaturalDate(betweenMatch[2], now, tzOffset, true);
+      let p2 = parseNaturalDate(betweenMatch[2], now, tzOffset, true);
+      if (p1 && !p2) {
+        const offsetMatch = betweenMatch[2].match(/(?:(\d+|a|one|two)\s+)?(week|day)s?\s*(?:after|later)/i);
+        if (offsetMatch) {
+          const num = (offsetMatch[1] === 'a' || offsetMatch[1] === 'one' || !offsetMatch[1]) ? 1 : (offsetMatch[1] === 'two' ? 2 : parseInt(offsetMatch[1], 10));
+          const unit = offsetMatch[2].toLowerCase().startsWith('week') ? 7 : 1;
+          const target = new Date(p1.getTime() + num * unit * 24 * 60 * 60 * 1000);
+          target.setHours(23, 59, 59, 999);
+          p2 = target;
+        }
+      }
       if (p1 && p2) {
         sinceDate = p1;
         untilDate = p2;
@@ -209,9 +226,9 @@ function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset 
       }
     }
 
-    // 6C. Standalone holiday: e.g. 'christmas', 'christmas 2025', 'new years'
+    // 6C. Standalone holiday: e.g. 'christmas', 'christmas 2025', 'new years', 'birthday'
     if (!sinceDate) {
-      const isHolidayQuery = tf.includes('christmas') || tf.includes('xmas') || tf.includes('new year') || tf.includes('halloween') || tf.includes('thanksgiving');
+      const isHolidayQuery = tf.includes('christmas') || tf.includes('xmas') || tf.includes('new year') || tf.includes('halloween') || tf.includes('thanksgiving') || tf.includes('birthday') || tf.includes('bday');
       if (isHolidayQuery) {
         const holidayStart = parseNaturalDate(tf, now, tzOffset, false);
         const holidayEnd = parseNaturalDate(tf, now, tzOffset, true);
