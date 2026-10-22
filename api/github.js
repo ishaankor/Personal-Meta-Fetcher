@@ -323,7 +323,6 @@ const KNOWN_EARLIEST_COMMIT = {
 };
 
 export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -395,7 +394,61 @@ export default async function handler(req, res) {
         fetchUrl += `&until=${encodeURIComponent(tfWindow.untilDate)}`;
       }
 
-      const commitsRes = await fetch(fetchUrl, { headers, cache: 'no-store' });
+      let fromIso = null;
+      let toIso = null;
+      if (!tfWindow.isLifetime && tfWindow.sinceDate) {
+        const startStr = tfWindow.sinceDate.split('T')[0];
+        const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
+        fromIso = `${startStr}T00:00:00Z`;
+        toIso = `${endStr}T23:59:59Z`;
+      }
+
+      let canRunGql = false;
+      if (token && fromIso && toIso) {
+        const d1 = new Date(fromIso).getTime();
+        const d2 = new Date(toIso).getTime();
+        const maxRangeMs = 365 * 24 * 60 * 60 * 1000;
+        if (d2 >= d1 && (d2 - d1) <= maxRangeMs) {
+          canRunGql = true;
+        }
+      }
+
+      const gqlQuery = canRunGql ? {
+        query: `
+          query {
+            user(login: "${username}") {
+              contributionsCollection(from: "${fromIso}", to: "${toIso}") {
+                commitContributionsByRepository(maxRepositories: 50) {
+                  repository {
+                    name
+                  }
+                  contributions(first: 100) {
+                    totalCount
+                  }
+                }
+              }
+            }
+          }
+        `,
+      } : null;
+
+      const [commitsRes, gqlRes] = await Promise.all([
+        fetch(fetchUrl, { headers, cache: 'no-store' }),
+        canRunGql
+          ? fetch('https://api.github.com/graphql', {
+              method: 'POST',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify(gqlQuery),
+              cache: 'no-store',
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .catch((err) => {
+                console.warn('GraphQL repo contribution fetch error:', err);
+                return null;
+              })
+          : Promise.resolve(null),
+      ]);
+
       if (!commitsRes.ok) {
         if (commitsRes.status === 404) {
           return res.status(404).json({
@@ -425,6 +478,18 @@ export default async function handler(req, res) {
             return !isBot && !isWf;
           })
         : [];
+
+      let gqlRepoContributions = 0;
+      if (gqlRes?.data?.user?.contributionsCollection) {
+        const reposList = gqlRes.data.user.contributionsCollection.commitContributionsByRepository || [];
+        const match = reposList.find(
+          (r) => (r.repository?.name || '').toLowerCase() === cleanRepo.toLowerCase()
+        );
+        if (match) {
+          gqlRepoContributions = match.contributions?.totalCount || 0;
+        }
+      }
+      const totalRepoCommits = Math.max(filteredCommits.length, gqlRepoContributions);
 
       // For top commits (up to 50), fetch detailed line diff stats
       const DETAILED_LIMIT = 50;
@@ -532,11 +597,11 @@ export default async function handler(req, res) {
       const untilPretty = tfWindow.untilDate ? tfWindow.untilDate.split('T')[0] : null;
 
       let directSummary = '';
-      if (filteredCommits.length > 0) {
+      if (totalRepoCommits > 0) {
         if (sincePretty && untilPretty) {
-          directSummary = `Ishaan made ${filteredCommits.length} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+          directSummary = `Ishaan made ${totalRepoCommits} commit(s) on ${cleanRepo} during ${tfWindow.resolvedLabel} (${sincePretty} to ${untilPretty}), totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
         } else {
-          directSummary = `Ishaan has recorded ${filteredCommits.length} commit(s) on ${cleanRepo}, totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
+          directSummary = `Ishaan has recorded ${totalRepoCommits} commit(s) on ${cleanRepo}, totaling ${totalLinesChanged.toLocaleString()} lines of code changed (+${totalAdditions.toLocaleString()}/-${totalDeletions.toLocaleString()}).`;
         }
       } else {
         directSummary = `Ishaan didn't log any commits for ${cleanRepo}${tfWindow.resolvedLabel ? ` during ${tfWindow.resolvedLabel}` : ''}.`;
@@ -560,7 +625,7 @@ export default async function handler(req, res) {
         timeframe: tfWindow.resolvedLabel || (sincePretty ? `${sincePretty} to ${untilPretty}` : 'all-time'),
         since: tfWindow.sinceDate,
         until: tfWindow.untilDate,
-        totalCommits: filteredCommits.length,
+        totalCommits: totalRepoCommits,
         commits: allCommitsList.slice(0, limitQuery || 100),
         latestCommit: latestCommitObj,
         repoCommit: latestCommitObj, // Backwards-compatible alias
@@ -623,17 +688,33 @@ export default async function handler(req, res) {
                               String(activeDateOrTimeframe).trim().toLowerCase() === 'lifetime';
 
       let dateSearchParam = null;
+      let fromIso = null;
+      let toIso = null;
       if (!isLifetimeQuery) {
         const singleIsoMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
         if (singleIsoMatch) {
           const cleanIso = singleIsoMatch[1];
           dateSearchParam = `${cleanIso}T00:00:00${localTz}..${cleanIso}T23:59:59${localTz}`;
+          fromIso = `${cleanIso}T00:00:00Z`;
+          toIso = `${cleanIso}T23:59:59Z`;
         } else if (tfWindow.sinceDate) {
           const startStr = tfWindow.sinceDate.split('T')[0];
           const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
           dateSearchParam = `${startStr}..${endStr}`;
+          fromIso = `${startStr}T00:00:00Z`;
+          toIso = `${endStr}T23:59:59Z`;
         } else {
           dateSearchParam = activeDateOrTimeframe;
+        }
+      }
+
+      let canRunGql = false;
+      if (token && fromIso && toIso) {
+        const d1 = new Date(fromIso).getTime();
+        const d2 = new Date(toIso).getTime();
+        const maxRangeMs = 365 * 24 * 60 * 60 * 1000;
+        if (d2 >= d1 && (d2 - d1) <= maxRangeMs) {
+          canRunGql = true;
         }
       }
 
@@ -643,16 +724,95 @@ export default async function handler(req, res) {
       }
       const searchQ = queryParts.join('+');
       const baseSearchUrl = `https://api.github.com/search/commits?q=${searchQ}&sort=committer-date&order=${orderQuery}&per_page=100`;
-      
-      const searchRes = await fetch(`${baseSearchUrl}&page=1`, { headers: searchHeaders, cache: 'no-store' });
+
+      const graphqlQuery = canRunGql ? {
+        query: `
+          query {
+            user(login: "${username}") {
+              contributionsCollection(from: "${fromIso}", to: "${toIso}") {
+                totalCommitContributions
+                totalIssueContributions
+                totalPullRequestContributions
+                totalPullRequestReviewContributions
+                contributionCalendar {
+                  totalContributions
+                  weeks {
+                    contributionDays {
+                      date
+                      contributionCount
+                    }
+                  }
+                }
+                commitContributionsByRepository(maxRepositories: 50) {
+                  repository {
+                    name
+                    isPrivate
+                  }
+                  contributions(first: 100) {
+                    totalCount
+                    nodes {
+                      occurredAt
+                      commitCount
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `,
+      } : null;
+
+      const [searchRes, gqlRes] = await Promise.all([
+        fetch(`${baseSearchUrl}&page=1`, { headers: searchHeaders, cache: 'no-store' }),
+        canRunGql
+          ? fetch('https://api.github.com/graphql', {
+              method: 'POST',
+              headers: {
+                ...headers,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(graphqlQuery),
+              cache: 'no-store',
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .catch((err) => {
+                console.warn('GraphQL contributions fetch error:', err);
+                return null;
+              })
+          : Promise.resolve(null),
+      ]);
+
       if (searchRes.ok) {
         const searchData = await searchRes.json();
-        const totalCount = searchData.total_count ?? 0;
+        let totalCount = searchData.total_count ?? 0;
         let allItems = searchData.items || [];
 
+        let gqlCommitContributions = 0;
+        let gqlContributionsCollection = null;
+        const gqlRepoContributions = {};
+
+        if (gqlRes && gqlRes.data?.user?.contributionsCollection) {
+          gqlContributionsCollection = gqlRes.data.user.contributionsCollection;
+          gqlCommitContributions = gqlContributionsCollection.totalCommitContributions ?? 0;
+          const repoList = gqlContributionsCollection.commitContributionsByRepository || [];
+          repoList.forEach((item) => {
+            const rName = item.repository?.name;
+            const rCount = item.contributions?.totalCount ?? 0;
+            if (rName && rCount > 0) {
+              gqlRepoContributions[rName] = rCount;
+            }
+          });
+        }
+
+        // GitHub REST search only indexes default branches and misses squashed/feature commits.
+        // GitHub GraphQL contributions collection provides authoritative contribution counts.
+        if (gqlCommitContributions > totalCount) {
+          totalCount = gqlCommitContributions;
+        }
+
         // Concurrently paginate up to 10 pages (max 1,000 commits) to capture all historical repositories & commit counts
-        if (totalCount > 100) {
-          const totalPagesToFetch = Math.min(Math.ceil(totalCount / 100), 10);
+        if ((searchData.total_count ?? 0) > 100) {
+          const totalPagesToFetch = Math.min(Math.ceil((searchData.total_count ?? 0) / 100), 10);
           const pagePromises = [];
           for (let p = 2; p <= totalPagesToFetch; p++) {
             pagePromises.push(
@@ -693,6 +853,13 @@ export default async function handler(req, res) {
           const repoFullName = item.repository?.full_name || '';
           const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || 'unknown';
           repoCounts[repoName] = (repoCounts[repoName] || 0) + 1;
+        });
+
+        // Merge authoritative GraphQL contribution counts to prevent undercounting
+        Object.entries(gqlRepoContributions).forEach(([rName, count]) => {
+          if (!repoCounts[rName] || repoCounts[rName] < count) {
+            repoCounts[rName] = count;
+          }
         });
 
         const activeRepositories = Object.keys(repoCounts).sort();
@@ -883,6 +1050,11 @@ export default async function handler(req, res) {
           firstCommit: calculatedEarliestCommit,
           latestCommit: calculatedLatestCommit,
           commits,
+          contributionTelemetry: gqlContributionsCollection ? {
+            totalCommitContributions: gqlContributionsCollection.totalCommitContributions,
+            totalContributions: gqlContributionsCollection.contributionCalendar?.totalContributions,
+            commitContributionsByRepository: gqlRepoContributions,
+          } : null,
           metaPageUrl: 'https://portfolio.ishaankoradia.com/meta',
           metaPagePromotion: "Explore Ishaan's live Meta telemetry dashboard at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository constellation.",
           servedAt: new Date().toISOString(),
