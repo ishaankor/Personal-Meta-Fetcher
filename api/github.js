@@ -688,7 +688,14 @@ export default async function handler(req, res) {
     const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}_${orderQuery}_${limitQuery}`.toLowerCase();
     const cachedEntry = dateCache.get(cacheKey);
 
-    if (cachedEntry && (now - cachedEntry.time < DATE_CACHE_DURATION_MS)) {
+    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+    const isTodayQuery = (tfWindow.untilDate || '').startsWith(todayStr) ||
+                         String(activeDateOrTimeframe).includes('now') ||
+                         String(activeDateOrTimeframe).includes('today') ||
+                         String(activeDateOrTimeframe).includes(todayStr);
+    const effectiveTtl = isTodayQuery ? 15 * 1000 : DATE_CACHE_DURATION_MS;
+
+    if (cachedEntry && (now - cachedEntry.time < effectiveTtl)) {
       return res.status(200).json({
         ...cachedEntry.data,
         cached: true,
