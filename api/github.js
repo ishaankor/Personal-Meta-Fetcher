@@ -855,7 +855,7 @@ export default async function handler(req, res) {
           }
         }
         
-        // Filter items strictly for single-day queries if needed
+        // Filter items strictly by America/Los_Angeles local date for both single-day and date ranges
         const getLocalDateStr = (isoStr) => {
           try {
             return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
@@ -863,15 +863,33 @@ export default async function handler(req, res) {
             return (isoStr || '').split('T')[0];
           }
         };
-        const dateMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+
+        const singleDateMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+        const rangeMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+        
+        let startLimit = null;
+        let endLimit = null;
+        if (singleDateMatch) {
+          startLimit = singleDateMatch[1];
+          endLimit = singleDateMatch[1];
+        } else if (rangeMatch) {
+          startLimit = rangeMatch[1];
+          endLimit = rangeMatch[2];
+        } else if (tfWindow.sinceDate) {
+          startLimit = getLocalDateStr(tfWindow.sinceDate);
+          endLimit = tfWindow.untilDate ? getLocalDateStr(tfWindow.untilDate) : null;
+        }
+
         const filteredItems = (allItems || []).filter((item) => {
           // Strictly exclude private repositories
           if (item.repository?.private) return false;
 
-          if (dateMatch) {
-            const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
-            return getLocalDateStr(commitDate) === dateMatch[1];
-          }
+          const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+          if (!commitDate) return false;
+          const localDay = getLocalDateStr(commitDate);
+
+          if (startLimit && localDay < startLimit) return false;
+          if (endLimit && localDay > endLimit) return false;
           return true;
         });
 
@@ -1076,6 +1094,8 @@ export default async function handler(req, res) {
           until: tfWindow.untilDate,
           repository: null,
           totalCommits: totalCount,
+          totalContributions: totalCount,
+          totalIndexedCommitRecords: filteredItems.length,
           activeRepositories,
           activeRepositoriesChronological,
           repositoriesByFirstCommit,
