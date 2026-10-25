@@ -21,6 +21,14 @@ function formatTimeAgo(dateString) {
   return `${days}d ago`;
 }
 
+function getLocalDateStr(isoStr) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
+  } catch {
+    return (isoStr || '').split('T')[0];
+  }
+}
+
 function isExcludedCommit(authorName = '', authorEmail = '', message = '') {
   const an = authorName.toLowerCase();
   const ae = authorEmail.toLowerCase();
@@ -156,7 +164,7 @@ export default async function handler(req, res) {
               if (item.repository?.isPrivate) return;
               const nodes = item.contributions?.nodes || [];
               nodes.forEach((node) => {
-                const dayStr = (node.occurredAt || '').split('T')[0];
+                const dayStr = getLocalDateStr(node.occurredAt);
                 if (dayStr) {
                   const count = node.commitCount || 0;
                   publicDailyCounts[dayStr] = (publicDailyCounts[dayStr] || 0) + count;

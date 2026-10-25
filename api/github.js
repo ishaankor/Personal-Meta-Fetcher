@@ -29,7 +29,32 @@ function formatTimeAgo(dateString) {
   return `${days}d ago`;
 }
 
-function parseNaturalDate(inputStr, now, tzOffset = 'Z', isEndOfDay = false) {
+function getPacificTzOffset(dateObj = new Date()) {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      timeZoneName: 'longOffset',
+    });
+    const parts = formatter.formatToParts(dateObj);
+    const tzPart = parts.find(p => p.type === 'timeZoneName');
+    if (tzPart && tzPart.value.startsWith('GMT')) {
+      return tzPart.value.replace('GMT', ''); // e.g. "-07:00" or "-08:00"
+    }
+  } catch (e) {
+    // fallback
+  }
+  return '-07:00';
+}
+
+function getLocalDateStr(isoStr) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date(isoStr));
+  } catch {
+    return (isoStr || '').split('T')[0];
+  }
+}
+
+function parseNaturalDate(inputStr, now, tzOffset = getPacificTzOffset(), isEndOfDay = false) {
   if (!inputStr) return null;
   const s = String(inputStr).trim().toLowerCase();
   if (s === 'today' || s === 'now' || s === 'present') {
@@ -114,7 +139,7 @@ function parseNaturalDate(inputStr, now, tzOffset = 'Z', isEndOfDay = false) {
   return null;
 }
 
-function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = 'Z' }) {
+function resolveTimeframeWindow({ timeframe, days, since, until, date, tzOffset = getPacificTzOffset() }) {
   const now = new Date();
   let sinceDate = null;
   let untilDate = null;
@@ -387,7 +412,7 @@ export default async function handler(req, res) {
       since: sinceParam,
       until: untilParam,
       date: dateQuery,
-      tzOffset: tzOffset || 'Z'
+      tzOffset: tzOffset || getPacificTzOffset()
     });
 
     // 1. Comprehensive repository commits lookup (timeframe, date range, or all-time)
@@ -414,8 +439,8 @@ export default async function handler(req, res) {
       let fromIso = null;
       let toIso = null;
       if (!tfWindow.isLifetime && tfWindow.sinceDate) {
-        const startStr = tfWindow.sinceDate.split('T')[0];
-        const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
+        const startStr = getLocalDateStr(tfWindow.sinceDate);
+        const endStr = getLocalDateStr(tfWindow.untilDate || new Date());
         fromIso = `${startStr}T00:00:00Z`;
         toIso = `${endStr}T23:59:59Z`;
       }
@@ -507,7 +532,8 @@ export default async function handler(req, res) {
           gqlRepoContributions = match.contributions?.totalCount || 0;
         }
       }
-      const totalRepoCommits = Math.max(filteredCommits.length, gqlRepoContributions);
+      // Anchor Model: Prioritize authoritative GraphQL contributions when available
+      const totalRepoCommits = gqlRepoContributions > 0 ? gqlRepoContributions : filteredCommits.length;
 
       // For top commits (up to 50), fetch detailed line diff stats
       const DETAILED_LIMIT = 50;
@@ -678,7 +704,7 @@ export default async function handler(req, res) {
   // e.g. /api/github?date=2026-10-06 or /api/github?timeframe=last two weeks
   const activeDateOrTimeframe = dateQuery || timeframeQuery;
   if (activeDateOrTimeframe) {
-    const localTz = tzOffset || '-07:00';
+    const localTz = tzOffset || getPacificTzOffset();
     const tfWindow = resolveTimeframeWindow({
       timeframe: timeframeQuery,
       date: dateQuery,
@@ -688,7 +714,7 @@ export default async function handler(req, res) {
     const cacheKey = `cross_${tfWindow.sinceDate || activeDateOrTimeframe}_${tfWindow.untilDate || 'now'}_${orderQuery}_${limitQuery}`.toLowerCase();
     const cachedEntry = dateCache.get(cacheKey);
 
-    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+    const todayStr = getLocalDateStr(new Date());
     const isTodayQuery = (tfWindow.untilDate || '').startsWith(todayStr) ||
                          String(activeDateOrTimeframe).includes('now') ||
                          String(activeDateOrTimeframe).includes('today') ||
@@ -717,17 +743,26 @@ export default async function handler(req, res) {
       let toIso = null;
       if (!isLifetimeQuery) {
         const singleIsoMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})(?:T.*)?$/);
+        const rangeMatch = String(activeDateOrTimeframe).trim().match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+        
+        let sDateStr = null;
+        let eDateStr = null;
+
         if (singleIsoMatch) {
-          const cleanIso = singleIsoMatch[1];
-          dateSearchParam = `${cleanIso}T00:00:00${localTz}..${cleanIso}T23:59:59${localTz}`;
-          fromIso = `${cleanIso}T00:00:00Z`;
-          toIso = `${cleanIso}T23:59:59Z`;
+          sDateStr = singleIsoMatch[1];
+          eDateStr = singleIsoMatch[1];
+        } else if (rangeMatch) {
+          sDateStr = rangeMatch[1];
+          eDateStr = rangeMatch[2];
         } else if (tfWindow.sinceDate) {
-          const startStr = tfWindow.sinceDate.split('T')[0];
-          const endStr = (tfWindow.untilDate || new Date().toISOString()).split('T')[0];
-          dateSearchParam = `${startStr}..${endStr}`;
-          fromIso = `${startStr}T00:00:00Z`;
-          toIso = `${endStr}T23:59:59Z`;
+          sDateStr = getLocalDateStr(tfWindow.sinceDate);
+          eDateStr = tfWindow.untilDate ? getLocalDateStr(tfWindow.untilDate) : getLocalDateStr(new Date());
+        }
+
+        if (sDateStr && eDateStr) {
+          dateSearchParam = sDateStr === eDateStr ? sDateStr : `${sDateStr}..${eDateStr}`;
+          fromIso = `${sDateStr}T00:00:00Z`;
+          toIso = `${eDateStr}T23:59:59Z`;
         } else {
           dateSearchParam = activeDateOrTimeframe;
         }
@@ -893,32 +928,69 @@ export default async function handler(req, res) {
           return true;
         });
 
-        // Group repositories and counts across the complete dataset
-        const repoCounts = {};
+        // Group repositories and counts across the complete dataset (raw indexed commits)
+        const rawRepoCounts = {};
         filteredItems.forEach((item) => {
           const repoFullName = item.repository?.full_name || '';
           const repoName = item.repository?.name || (repoFullName.includes('/') ? repoFullName.split('/')[1] : repoFullName) || 'unknown';
-          repoCounts[repoName] = (repoCounts[repoName] || 0) + 1;
+          rawRepoCounts[repoName] = (rawRepoCounts[repoName] || 0) + 1;
         });
 
-        // Merge authoritative GraphQL contribution counts to prevent undercounting
-        Object.entries(gqlRepoContributions).forEach(([rName, count]) => {
-          if (!repoCounts[rName] || repoCounts[rName] < count) {
-            repoCounts[rName] = count;
-          }
-        });
+        // Anchor Model: Authoritative contribution counts from GraphQL anchor truth
+        const repoCounts = {};
+        if (canRunGql && gqlContributionsCollection) {
+          // If GraphQL returned authoritative public repo contributions:
+          Object.entries(gqlRepoContributions).forEach(([rName, count]) => {
+            if (count > 0) {
+              repoCounts[rName] = count;
+            }
+          });
+          // Include any repos found in git search if not in GraphQL (e.g. branch commits)
+          Object.entries(rawRepoCounts).forEach(([rName, count]) => {
+            if (!repoCounts[rName]) {
+              repoCounts[rName] = count;
+            }
+          });
+        } else {
+          Object.assign(repoCounts, rawRepoCounts);
+        }
 
-        // Recalculate totalCount strictly across public repositories
-        const calculatedPublicCommits = Object.values(repoCounts).reduce((a, b) => a + b, 0);
-        if (calculatedPublicCommits > 0) {
-          totalCount = calculatedPublicCommits;
-        } else if (gqlCommitContributions > 0) {
+        // Anchor totalCount strictly to authoritative public GraphQL contributions if available
+        totalCount = 0;
+        if (canRunGql && gqlCommitContributions > 0) {
           totalCount = gqlCommitContributions;
+        } else if (Object.keys(repoCounts).length > 0) {
+          totalCount = Object.values(repoCounts).reduce((a, b) => a + b, 0);
         } else {
           totalCount = filteredItems.length;
         }
 
         const activeRepositories = Object.keys(repoCounts).sort();
+
+        // Daily contributions breakdown strictly across public repositories
+        const dailyContributions = {};
+        if (canRunGql && gqlContributionsCollection) {
+          const repoList = gqlContributionsCollection.commitContributionsByRepository || [];
+          repoList.forEach((item) => {
+            if (item.repository?.isPrivate) return;
+            const nodes = item.contributions?.nodes || [];
+            nodes.forEach((node) => {
+              const dayStr = getLocalDateStr(node.occurredAt);
+              if (dayStr && (!startLimit || dayStr >= startLimit) && (!endLimit || dayStr <= endLimit)) {
+                dailyContributions[dayStr] = (dailyContributions[dayStr] || 0) + (node.commitCount || 0);
+              }
+            });
+          });
+        }
+        if (Object.keys(dailyContributions).length === 0) {
+          filteredItems.forEach((item) => {
+            const commitDate = item.commit?.committer?.date || item.commit?.author?.date || '';
+            const localDay = getLocalDateStr(commitDate);
+            if (localDay && (!startLimit || localDay >= startLimit) && (!endLimit || localDay <= endLimit)) {
+              dailyContributions[localDay] = (dailyContributions[localDay] || 0) + 1;
+            }
+          });
+        }
 
         // Enrich the top commits respecting limitQuery for fast Vercel execution (fetch line diffs for top 12)
         const commits = await Promise.all(
@@ -1080,7 +1152,7 @@ export default async function handler(req, res) {
           : `Worked on ${activeRepositories.length} repositories: ${breakdownParts.join(', ')} (totaling ${totalCount} commits).`;
 
         if (orderQuery === 'asc' && calculatedEarliestCommit) {
-          const eDateStr = (calculatedEarliestCommit.date || '').split('T')[0];
+          const eDateStr = getLocalDateStr(calculatedEarliestCommit.date);
           directSummary += ` Earliest commit in this query was in '${calculatedEarliestCommit.repoName}' on ${eDateStr} with message '${calculatedEarliestCommit.message}' (${calculatedEarliestCommit.shortSha}).`;
         }
 
@@ -1103,6 +1175,8 @@ export default async function handler(req, res) {
           repositoriesByActivity,
           totalRepositoriesWorkedOn: activeRepositories.length,
           repositoryCommitCounts: repoCounts,
+          repositoryIndexedCommitCounts: rawRepoCounts,
+          dailyContributions,
           directSummary,
           earliestCommit: calculatedEarliestCommit,
           firstCommit: calculatedEarliestCommit,
@@ -1342,7 +1416,7 @@ export default async function handler(req, res) {
               if (item.repository?.isPrivate) return; // Strictly ignore private repositories
               const nodes = item.contributions?.nodes || [];
               nodes.forEach((node) => {
-                const dayStr = (node.occurredAt || '').split('T')[0];
+                const dayStr = getLocalDateStr(node.occurredAt);
                 if (dayStr) {
                   const count = node.commitCount || 0;
                   publicDailyCounts[dayStr] = (publicDailyCounts[dayStr] || 0) + count;
